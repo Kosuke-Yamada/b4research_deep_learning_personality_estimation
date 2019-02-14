@@ -1,0 +1,217 @@
+# -*-coding:utf-8-*-
+#embedding
+
+import os
+import numpy as np
+from keras.models import model_from_json
+from keras.preprocessing import sequence
+
+from sklearn.metrics import roc_curve, auc
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import keras.backend as K
+
+import tensorflow as tf
+import random as rn
+
+import json
+
+SEED = 1
+NUM = 1
+MBTI = "EI"
+MAX_TWEET_LENGTH = 15000
+MAX_DES_LENGTH = 80
+
+NUM_SAMPLE = 10
+
+READ_DICT_FILE_00 = "../DATA/08.TRAIN_DICT/dict_info.json"
+READ_DICT_FILE_01 = "../DATA/08.TRAIN_DICT/dict_tweet.json"
+READ_DICT_FILE_02 = "../DATA/08.TRAIN_DICT/dict_des.json"
+DICT_LIST = [READ_DICT_FILE_00, READ_DICT_FILE_01, READ_DICT_FILE_02]
+
+READ_TEST_MBTI_FILE = "../DATA/09.DATASET_TDT/test_mbti.json"
+READ_TEST_TWEET_FILE = "../DATA/09.DATASET_TDT/test_tweet_word_binary.json"
+READ_TEST_DES_FILE = "../DATA/09.DATASET_TDT/test_des_index.json"
+TEST_LIST = [READ_TEST_MBTI_FILE, READ_TEST_TWEET_FILE, READ_TEST_DES_FILE]
+
+READ_MODEL_FILE = "../DATA/11.MODEL3-2/save_model/"+str(MBTI)+"_"+str(NUM).zfill(2)+".json"
+READ_WEIGHT_BEST_FILE = "../DATA/11.MODEL3-2/best_weight/"+str(MBTI)+"_"+str(NUM).zfill(2)+".hdf5"
+
+WRITE_ROC_PICTURE_FILE = "../DATA/11.MODEL3-2/test_roc_picture/"+str(MBTI)+"_"+str(NUM).zfill(2)+".png"
+
+#シードの固定
+def seed(seed):
+    os.environ['PYTHONHASHSEED'] = '0'
+    np.random.seed(seed)
+    rn.seed(seed)
+    session_conf = tf.ConfigProto(intra_op_parallelism_threads = 1, inter_op_parallelism_threads = 1)
+    tf.set_random_seed(seed)
+    session = tf.Session(graph = tf.get_default_graph(), config = session_conf)
+    K.set_session(session)
+
+#辞書情報
+def info_dict(dict_list):
+    index_dict = {}
+    max_features = 0
+    for read_file in dict_list:
+        with open(read_file, "r") as fread:
+            read_dict = json.load(fread)
+        for key in list(read_dict):
+            index_dict[key] = int(read_dict[key]) + max_features
+        max_features = max(index_dict.values()) + 1
+    return max_features
+
+#学習データ情報
+def info_num_data(read_file):
+    with open(read_file, "r") as fread:
+        read_dict = json.load(fread)
+    num_data = len(list(read_dict))
+    return num_data
+
+#特徴ベクトル作成
+def make_feature_vector(read_file_list, num_data, mbti, max_tweet_length, max_des_length):
+    x_tweet = np.empty((num_data, ), dtype = list)
+    x_des = np.empty((num_data, ), dtype = list)
+    y = np.zeros((num_data, ))    
+    for i in range(num_data):
+        x_tweet[i] = []
+        x_des[i] = []
+    for read_file in read_file_list:
+        with open(read_file, "r") as fread:
+            read_dict = json.load(fread)
+        if "mbti" in read_file:
+            for i, user_id in enumerate(list(read_dict)):
+                y[i] = read_dict[user_id]['mbti_'+str(mbti)]
+        if "tweet" in read_file:
+            for i, user_id in enumerate(list(read_dict)):
+                x_tweet[i] += [w+2 if w != -1 else 1 for w in read_dict[user_id]]
+        if "des" in read_file:
+            for i, user_id in enumerate(list(read_dict)):
+                x_des[i] += [w+2 if w != -1 else 1 for w in read_dict[user_id]]
+    x_tweet = sequence.pad_sequences(x_tweet, maxlen = max_tweet_length)
+    x_des = sequence.pad_sequences(x_des, maxlen = max_des_length)
+    return x_tweet, x_des, y
+
+def print_sample(xtest_tweet, xtest_des, ytest, model, max_tweet_length, num_sample, max_des_length):
+    for i in range(num_sample):
+        num_random = np.random.randint(len(xtest))
+        x_tweet = xtest_tweet[num_random].reshape(1, max_tweet_length)
+        x_des = xtest_des[num_random].reshape(1, max_des_length)
+        ylabel = ytest[num_random]
+        ypred = model.predict([x_tweet, x_des])[0][0]
+        print(str(ypred)+"\t"+str(ylabel)+"\n"+str(x_tweet))
+
+#混合行列のための計算
+def print_confusion_matrix(xtest_tweet, xtest_des, ytest, model, max_tweet_length, max_des_length):
+    tp = 0
+    fn = 0
+    fp = 0
+    tn = 0
+    for i in range(len(xtest)):
+        x_tweet = xtest_tweet[i].reshape(1, max_tweet_length)
+        x_des = xtest_des[i].reshape(1, max_des_length)        
+        ylabel = int(ytest[i])
+        ypred = model.predict([x_tweet, x_des])[0][0]
+        ypred = [1 if ypred >= 0.5 else 0][0]
+        if (ylabel == ypred) and (ylabel == 1):
+            tp += 1
+        if (ylabel != ypred) and (ylabel == 1):
+            fn += 1
+        if (ylabel != ypred) and (ylabel == 0):
+            fp += 1
+        if (ylabel == ypred) and (ylabel == 0):
+            tn += 1
+    sum_class_p = tp + fn
+    sum_class_n = fp + tn
+    sum_pred_p = tp + fp
+    sum_pred_n = fn + tn
+    sum_all = tp + fn + fp + tn
+    precision_p = [float(tp / sum_pred_p) if sum_pred_p != 0 else 0][0]
+    precision_n = [float(tn / sum_pred_n) if sum_pred_n != 0 else 0][0]
+    recall_p = [float(tp / sum_class_p) if sum_class_p != 0 else 0][0]
+    recall_n = [float(tn / sum_class_n) if sum_class_n != 0 else 0][0]
+    fscore_p = [float((2 * precision_p * recall_p) / (precision_p + recall_p)) if (precision_p + recall_p) != 0 else 0][0]
+    fscore_n = [float((2 * precision_n * recall_n) / (precision_n + recall_n)) if (precision_n + recall_n) != 0 else 0][0]            
+    fscore = float((fscore_p + fscore_n) / 2)
+    if sum_class_p > sum_class_n:
+        maj = sum_class_p
+        majority = float(sum_class_p / sum_all)
+    else:
+        maj = sum_class_n
+        majority = float(sum_class_n / sum_all)
+    accuracy = (tp + tn) / sum_all
+    
+    print("***Confusion Matrix***")
+    print("\t"+"pred_p"+"\t"+"pred_n"+"\t"+"sum")
+    print("class_p"+"\t"+str(tp)+"\t"+str(fn)+"\t"+str(sum_class_p))
+    print("class_n"+"\t"+str(fp)+"\t"+str(tn)+"\t"+str(sum_class_n))
+    print("sum"+"\t"+str(sum_pred_p)+"\t"+str(sum_pred_n)+"\t"+str(sum_all))
+    print("***Score***")
+    print("Precision_p"+"\t"+"= "+str(precision_p)+" ("+str(tp)+"/"+str(sum_pred_p)+")")
+    print("Precision_n"+"\t"+"= "+str(precision_n)+" ("+str(tn)+"/"+str(sum_pred_n)+")")
+    print("Recall_p"+"\t"+"= "+str(recall_p)+" ("+str(tp)+"/"+str(sum_class_p)+")")
+    print("Recall_n"+"\t"+"= "+str(recall_n)+" ("+str(tn)+"/"+str(sum_class_n)+")")
+    print("F-score_p"+"\t"+"= "+str(fscore_p))
+    print("F-score_n"+"\t"+"= "+str(fscore_n))
+    print("F-score"+"\t\t"+"= "+str(fscore))
+    print("Majority"+"\t"+"= "+str(majority)+" ("+str(maj)+"/"+str(sum_all)+")")
+    print("Accuracy"+"\t"+"= "+str(accuracy)+" ("+str(tp+tn)+"/"+str(sum_all)+")")
+
+#ROC,AUCの出力
+def print_roc_auc(xtest_tweet, xtest_des, ytest, model, max_tweet_length, roc_picture_file, max_des_length):
+
+    ypredlist = []
+    for i in range(len(xtest_tweet)):
+        x_tweet = xtest_tweet[i].reshape(1, max_tweet_length)
+        x_des = xtest_des[i].reshape(1, max_des_length)
+        ypred = model.predict([x_tweet,x_des])[0][0]
+        ypredlist.append(ypred)
+    ypredlist = np.array(ypredlist)
+    fpr, tpr, thresholds = roc_curve(ytest, ypredlist)
+    plt.plot(fpr, tpr, label = "ROC Curve")
+    plt.xlabel("FPR")
+    plt.ylabel("TPR")
+    close_zero = np.argmin(np.abs(thresholds))
+    plt.plot(fpr[close_zero], tpr[close_zero], 'o', markersize = 10, label = "thereshold zero", fillstyle = "none", c = 'k', mew = 2)
+    plt.legend(loc = 4)
+    plt.savefig(roc_picture_file)
+    
+    AUC = auc(fpr, tpr)
+    print("AUC"+"\t\t"+"= "+str(AUC))
+
+
+    
+#メインプログラム
+if __name__ == '__main__':
+
+    #シードの固定
+    seed(SEED)
+    
+    #辞書データ
+    max_features = info_dict(DICT_LIST)
+
+    #学習データ
+    num_test_data = info_num_data(READ_TEST_TWEET_FILE)
+    print(num_test_data)
+    
+    #学習データとテストデータを特徴ベクトルに変換 
+    xtest_tweet, xtest_des, ytest = make_feature_vector(TEST_LIST, num_test_data, MBTI, MAX_TWEET_LENGTH, MAX_DES_LENGTH)
+
+    #モデルの作成
+    with open(READ_MODEL_FILE,"r") as fread:
+        model = model_from_json(fread.read())
+    model.compile(loss = "binary_crossentropy", optimizer = "adam", metrics = ["accuracy"])
+    model.summary()
+
+    #重み読込み
+    model.load_weights(READ_WEIGHT_BEST_FILE)
+    
+    #サンプル出力
+    print_sample(xtest_tweet, xtest_des, ytest, model, MAX_TWEET_LENGTH, NUM_SAMPLE, MAX_DES_LENGTH)
+    
+    #混合行列出力
+    print_confusion_matrix(xtest_tweet, xtest_des, ytest, model, MAX_TWEET_LENGTH, MAX_DES_LENGTH)
+
+    #ROC出力
+    print_roc_auc(xtest_tweet, xtest_des, ytest, model, MAX_TWEET_LENGTH, WRITE_ROC_PICTURE_FILE, MAX_DES_LENGTH)
